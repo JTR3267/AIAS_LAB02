@@ -64,11 +64,10 @@ print(f"Operator types: {ops}")
 operator_attributes = dict()
 for i in onnx_model.graph.node:
     attrs = dict()
-    if "Conv" in i.name:
-        input_dims = get_value_by_key(i.input[0])["dim"]
-        attrs["Width"] = input_dims[-1]
-        attrs["Height"] = input_dims[-2]
-        attrs["Channel"] = input_dims[-3]
+    if not any(op in i.name for op in ["Constant", "Gather", "Unsqueeze", "Concat", "Gemm"]):
+        attrs["input_dim"] = get_value_by_key(i.input[0])["dim"]
+    if not any(op in i.name for op in ["Shape", "Constant", "Gather", "Unsqueeze", "Concat", "Reshape"]):
+        attrs["output_dim"] = get_value_by_key(i.output[0])["dim"]
     for attr in i.attribute:
         attr_str = str(attr).strip()
         attrs[attr.name] = ", ".join(attr_str.split("\n")[1:])
