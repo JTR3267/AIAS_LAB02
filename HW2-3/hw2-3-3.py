@@ -5,13 +5,21 @@ import torchvision.models as models
 def replace_linear_layer(model, new_module):
     for child_name, child_module in model.named_children():
         if isinstance(child_module, nn.Linear):
-            setattr(model, child_name, new_module(child_module.in_features, child_module.out_features))
+            if child_module.bias.data is not None:
+                setattr(model, child_name, new_module(child_module.in_features, child_module.out_features,
+                                                      child_module.weight.data, bias_data=child_module.bias.data))
+            else:
+                setattr(model, child_name, new_module(child_module.in_features, child_module.out_features,
+                                                      child_module.weight.data, bias=False))
         else:
             replace_linear_layer(child_module, new_module)
 
 class Split64Linear(nn.Linear):
-    def __init__(self, in_features, out_features, bias=True):
+    def __init__(self, in_features, out_features, weight_data, bias=True, bias_data=None):
         super(Split64Linear, self).__init__(in_features, out_features, bias)
+        self.weight.data.copy_(weight_data)
+        if bias_data is not None:
+            self.bias.data.copy_(bias_data)
     
     def _split_64_row_first(self, input_tensor):
         split_rows = torch.split(input_tensor, 64, dim=0)

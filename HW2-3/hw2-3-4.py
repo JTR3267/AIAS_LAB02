@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -5,13 +6,39 @@ import torchvision.models as models
 def replace_linear_layer(model, new_module):
     for child_name, child_module in model.named_children():
         if isinstance(child_module, nn.Linear):
-            setattr(model, child_name, new_module(child_module.in_features, child_module.out_features))
+            if child_module.bias.data is not None:
+                setattr(model, child_name, new_module(child_module.in_features, child_module.out_features,
+                                                      child_module.weight.data, bias_data=child_module.bias.data))
+            else:
+                setattr(model, child_name, new_module(child_module.in_features, child_module.out_features,
+                                                      child_module.weight.data, bias=False))
         else:
             replace_linear_layer(child_module, new_module)
+    
+def compare_tensor(tensor1, tensor2):
+    if tensor1.shape != tensor2.shape:
+        print(f"Output shape different")
+    else:
+        print(f"Same output shape {tensor1.shape}")
+        
+    threshold = 1
+    while True:
+        compared_result = torch.sub(tensor1, tensor2) < threshold
+        if torch.sum(~compared_result) > 0:
+            print(f"{10 * threshold:.1e} > The maximum difference between tensor1 and tensor2 > {threshold:.1e}")
+            break
+        elif threshold < 1e-10:
+            print(f"The maximum difference between tensor1 and tensor2 < {threshold:.1e}")
+            break
+        threshold /= 10
+    
 
 class CompareSplit64Linear(nn.Linear):
-    def __init__(self, in_features, out_features, bias=True):
+    def __init__(self, in_features, out_features, weight_data, bias=True, bias_data=None):
         super(CompareSplit64Linear, self).__init__(in_features, out_features, bias)
+        self.weight.data.copy_(weight_data)
+        if bias_data is not None:
+            self.bias.data.copy_(bias_data)
     
     def _split_64_row_first(self, input_tensor):
         split_rows = torch.split(input_tensor, 64, dim=0)
@@ -38,21 +65,6 @@ class CompareSplit64Linear(nn.Linear):
     def _concat_tensors(self, tensors):
         colwise_concat_tensors = [torch.cat(tuple(row), dim=1) for row in tensors]
         return torch.cat(tuple(colwise_concat_tensors), dim=0)
-    
-    def _compare_tensor(self, split_64_tensor, linear_tensor):
-        if split_64_tensor.shape != linear_tensor.shape:
-            print(f"Output shape different")
-        else:
-            print(f"Same output shape {split_64_tensor.shape}")
-        
-        threshold = 1
-        while True:
-            compared_result = torch.sub(split_64_tensor, linear_tensor) < threshold
-            if torch.sum(~compared_result) > 0:
-                break
-            threshold /= 10
-        print(f"{10 * threshold:.1e} > The maximum difference between tensor1 and tensor2 > {threshold:.1e}")
-
 
     def forward(self, input_tensor):
         split_tensors_a = self._split_64_row_first(input_tensor)
@@ -62,10 +74,17 @@ class CompareSplit64Linear(nn.Linear):
         if self.bias is not None:
             concat_tensor = torch.add(concat_tensor, self.bias)
         linear_tensor = super(CompareSplit64Linear, self).forward(input_tensor)
-        self._compare_tensor(concat_tensor, linear_tensor)
+        print("Linear layer output compare")
+        compare_tensor(concat_tensor, linear_tensor)
         return concat_tensor
 
 alexnet_input = torch.randn(10, 3, 224, 224)
-replaced_alexnet = models.alexnet(pretrained=True)
+alexnet = models.alexnet(pretrained=True)
+replaced_alexnet = copy.deepcopy(alexnet)
 replace_linear_layer(replaced_alexnet, CompareSplit64Linear)
-output = replaced_alexnet(alexnet_input)
+alexnet.eval()
+replaced_alexnet.eval()
+original_output = alexnet(alexnet_input)
+replaced_output = replaced_alexnet(alexnet_input)
+print("Model output compare")
+compare_tensor(original_output, replaced_output)
