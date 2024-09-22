@@ -223,7 +223,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 int main(int argc, const char* argv[])
 {
     if (argc != 2) {
-        std::cerr << "usage: ./hw2-4-1 <path-to-exported-script-module>\n";
+        std::cerr << "usage: ./hw2-4-2 <path-to-exported-script-module>\n";
         return -1;
     }
 
