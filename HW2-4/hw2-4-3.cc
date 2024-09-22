@@ -112,7 +112,7 @@ std::string getOperatorType(const std::string& str)
     return operator_type.substr(0, operator_type.length() - 2);
 }
 
-void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* t_a_m_r)
+void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* total_mac)
 {
     if (module.value.named_children().size() == 0)
     {
@@ -120,15 +120,13 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 
         if (operator_type == "BatchNorm2d")
         {
-            std::cout << operator_type << " " << input_tensor->sizes() << " " << input_tensor->sizes() << std::endl;
-            *t_a_m_r += input_tensor->numel() * input_tensor->element_size();
+            *total_mac += 2 * input_tensor->sizes()[1];
             return;
         }
         else if (operator_type == "Split64Linear")
         {
             auto dim = input_tensor->numel();
             *input_tensor = input_tensor->view({1, dim});
-            std::cout << operator_type << " " << input_tensor->sizes() << " ";
 
             int in_features;
             int out_features;
@@ -144,14 +142,27 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
             auto linear_layer = torch::nn::Linear(torch::nn::LinearOptions(in_features, out_features));
             *input_tensor = linear_layer(*input_tensor);
 
-            std::cout << input_tensor->sizes() << std::endl;
-            *t_a_m_r += input_tensor->numel() * input_tensor->element_size();
+            *total_mac += in_features * out_features;
             return;
         }
         else if (operator_type == "Linear")
         {
             auto dim = input_tensor->numel();
             *input_tensor = input_tensor->view({1, dim});
+
+            int in_features;
+            int out_features;
+            for (const auto& param : module.value.named_parameters())
+            {
+                if (param.name.find("weight") != std::string::npos)
+                {
+                    in_features = param.value.sizes()[1];
+                    out_features = param.value.sizes()[0];
+                    break;
+                }
+            }
+
+            *total_mac += in_features * out_features;
         }
 
         auto graph = module.value.get_method("forward").graph();
@@ -193,11 +204,33 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 				}
                 try
                 {
-                    operation(torch_stack);
-                    std::cout << operator_type << " " << input_tensor->sizes() << " ";
-				    *input_tensor = torch_stack.back().toTensor();
-                    std::cout << input_tensor->sizes() << std::endl;
-                    *t_a_m_r += input_tensor->numel() * input_tensor->element_size();
+                    if (operator_type == "Conv2d")
+                    {
+                        int in_channel = input_tensor->sizes()[1];
+                        int kernel1, kernel2;
+                        for (const auto& param : module.value.named_parameters())
+                        {
+                            if (param.name.find("weight") != std::string::npos)
+                            {
+                                kernel1 = param.value.sizes()[2];
+                                kernel2 = param.value.sizes()[3];
+                                break;
+                            }
+                        }
+                        auto kernel_ops = kernel1 * kernel2 * in_channel;
+
+                        operation(torch_stack);
+				        *input_tensor = torch_stack.back().toTensor();
+                        
+                        auto dim = input_tensor->sizes();
+                        auto output_elements = dim[1] * dim[2] * dim[3];
+                        *total_mac += kernel_ops * output_elements;
+                    }
+                    else
+                    {
+                        operation(torch_stack);
+				        *input_tensor = torch_stack.back().toTensor();
+                    }
                 }
                 catch(const std::exception& e)
                 {
@@ -205,7 +238,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
                     {
                         auto dim = input_tensor->sizes();
                         *input_tensor = torch::randn({dim[0], dim[1] / 2, dim[2] * 2, dim[3] * 2});
-                        return extract_input_output(module, input_tensor, t_a_m_r);
+                        return extract_input_output(module, input_tensor, total_mac);
                     }
                 }
             }
@@ -215,7 +248,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
     {
         for (const auto& sub_module : module.value.named_children())
         {
-            extract_input_output(sub_module, input_tensor, t_a_m_r);
+            extract_input_output(sub_module, input_tensor, total_mac);
         }
     }
 }
@@ -223,7 +256,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 int main(int argc, const char* argv[])
 {
     if (argc != 2) {
-        std::cerr << "usage: ./hw2-4-1 <path-to-exported-script-module>\n";
+        std::cerr << "usage: ./hw2-4-3 <path-to-exported-script-module>\n";
         return -1;
     }
 
@@ -231,12 +264,12 @@ int main(int argc, const char* argv[])
     try {
         module = torch::jit::load(argv[1]);
         torch::Tensor input_tensor = torch::randn({1, 3, 224, 224});
-        int total_activation_memory_requirement = 0;
+        int total_mac = 0;
         for (const auto& sub_module : module.named_children())
         {
-            extract_input_output(sub_module, &input_tensor, &total_activation_memory_requirement);
+            extract_input_output(sub_module, &input_tensor, &total_mac);
         }
-        std::cout << "Total activations memory requirement: " << total_activation_memory_requirement << std::endl;
+        std::cout << "Total MAC: " << total_mac << std::endl;
     }
     catch (const c10::Error& e) {
         std::cerr << "error loading the model\n";
