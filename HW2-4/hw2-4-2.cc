@@ -30,7 +30,9 @@ void getConstantParam(torch::jit::Node* input_node, std::string parme_type_strin
 				case torch::jit::AttributeKind::t:
 					torch_stack->push_back(input_node->t(parent_attr));
 					break;
+                // 處理 string
                 case torch::jit::AttributeKind::s:
+                    // 判斷 Device = prim::Constant[value="cpu"]()，push string 到 stack 在 operation 會錯
                     if (parme_type_string.substr(0, 6) == "Device" && input_node->s(parent_attr) == "cpu")
                     {
                         torch::Device device(torch::kCPU);
@@ -55,6 +57,7 @@ void getListParam(torch::jit::Node* input_node, torch::jit::Stack* torch_stack, 
 
 	for (const auto& parent_in : input_node->inputs())
     {
+        // 傳入紀錄計算結果的 map，並先從這個 map 開始搜尋
         if (input_map->find(parent_in->debugName()) != input_map->end())
         {
             if ((*input_map)[parent_in->debugName()].isInt())
@@ -122,6 +125,7 @@ void getGetAttrParam(torch::jit::Node* input_node, torch::jit::named_attribute_l
 	torch_stack->push_back(parameter);
 }
 
+// parse string，回傳 operator type
 std::string getOperatorType(const std::string& str)
 {
     auto first_line_pos = str.find('\n');
@@ -131,8 +135,10 @@ std::string getOperatorType(const std::string& str)
     return operator_type.substr(0, operator_type.length() - 2);
 }
 
+// 有 down sample 的 BasicBlock 專用
 void extract_basic_block_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* t_a_m_r)
 {
+    // copy 一份 input 作為 downsample 傳入
     torch::Tensor input_copy = torch::zeros(input_tensor->sizes());
     input_copy.copy_(*input_tensor);
 
@@ -144,7 +150,7 @@ void extract_basic_block_input_output(torch::jit::NameModule module, torch::Tens
         }
         extract_input_output(sub_module, input_tensor, t_a_m_r);
     }
-
+    // downsample
     for (const auto& sub_module : module.value.named_children())
     {
         if (sub_module.name == "downsample")
@@ -155,13 +161,15 @@ void extract_basic_block_input_output(torch::jit::NameModule module, torch::Tens
             }
         }
     }
-
+    // 最後一層 relu 加總
     *input_tensor = input_tensor->add(input_copy);
+    // relu output activation
     *t_a_m_r += input_tensor->numel() * input_tensor->element_size();
 }
 
 void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* t_a_m_r)
 {
+    // 只處理沒有 sublayer 的
     if (module.value.named_children().size() == 0)
     {
         auto operator_type = getOperatorType(module.value.dump_to_str(1, 0, 0));
@@ -178,6 +186,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 
         for (const auto& node : nodes)
         {
+            // 將 tensor list 中的 tensor 分開並存入 map
             if (node->kind() == torch::prim::ListUnpack)
             {
                 auto tensor_list = input_map[node->inputs()[0]->debugName()].toTensorList();
@@ -215,27 +224,32 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 							torch_stack.push_back(*input_tensor);
 							break;
 						default:
+                            // 從 map 中取值放入 stack
                             torch_stack.push_back(input_map[input_nodes[idx]->debugName()]);
 							break;
                     }
 
                     idx++;
 				}
-
+                // 將 output assign 為 input 移動到迴圈外面，避免像是 BatchNorm2d, Split64Linear 單 layer 中有多個 operation
                 operation(torch_stack);
+                // 將運算結果存回 map
                 input_map[node->outputs()[0]->debugName()] = torch_stack.back();
             }
         }
 
         std::cout << operator_type << " " << input_tensor->sizes() << " ";
+        // 將 input assign 成這層 layer 的 output
 		*input_tensor = torch_stack.back().toTensor();
         std::cout << input_tensor->sizes() << std::endl;
+        // 計算 output activation
         *t_a_m_r += input_tensor->numel() * input_tensor->element_size();
     }
     else
     {
         for (const auto& sub_module : module.value.named_children())
         {
+            // 有 downsample 的 BasicBlock 額外處理
             auto operator_type = getOperatorType(sub_module.value.dump_to_str(1, 0, 0));
             if (operator_type == "BasicBlock" && sub_module.value.dump_to_str(1, 0, 0).find("downsample") != std::string::npos)
             {

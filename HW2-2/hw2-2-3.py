@@ -99,13 +99,15 @@ for output in onnx_model.graph.output:
 
 max_activation = 0
 
+# 假設不需要的 output activation 會被清除，所需用來保存 output activation 的最小 storage requirement
 for i in onnx_model.graph.node:
+    # 從 Netron 結果來看 Add 跟 Reshape 需要兩個 input，因此不能只保留單一 layer 的 output activation
     if "Add" in i.name or "Reshape" in i.name:
         sum_activation = 0
         for input_name in i.input:
             sum_activation += mutiply_tuple(get_value_by_key(input_name))
         max_activation = max(max_activation, sum_activation)
-
+    # 計算單一 layer 最大 output activation
     for output_name in i.output:
         max_activation = max(max_activation, mutiply_tuple(get_value_by_key(output_name)))
 

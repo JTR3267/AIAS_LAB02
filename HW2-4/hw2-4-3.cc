@@ -157,6 +157,7 @@ void extract_basic_block_input_output(torch::jit::NameModule module, torch::Tens
     }
 
     *input_tensor = input_tensor->add(input_copy);
+    // 計算 tensor 相加的 MAC
     *total_mac += input_tensor->sizes()[0] * input_tensor->sizes()[1];
 }
 
@@ -225,12 +226,14 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
                 if (node->kind() == torch::aten::add)
                 {
                     auto tensor1 = torch_stack[0].toTensor();
+                    // 計算 tensor 相加的 MAC
                     *total_mac += tensor1.sizes()[0] * tensor1.sizes()[1];
                 }
                 else if (node->kind() == torch::aten::matmul)
                 {
                     auto tensor1 = torch_stack[0].toTensor();
                     auto tensor2 = torch_stack[1].toTensor();
+                    // 計算 tensor 相乘的 MAC
                     *total_mac += tensor1.sizes()[0] * tensor1.sizes()[1] * tensor2.sizes()[1];
                 }
                 
@@ -240,6 +243,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
         }
         if (operator_type == "Conv2d")
         {
+            // Conv2d MAC 計算
             int in_channel = input_tensor->sizes()[1];
             int kernel1, kernel2;
             for (const auto& param : module.value.named_parameters())
@@ -263,10 +267,12 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
         {
             if (operator_type == "BatchNorm2d")
             {
+                // BatchNorm2d MAC 計算
                 *total_mac += 2 * input_tensor->sizes()[1];
             }
             else if (operator_type == "Linear")
             {
+                // Linear MAC 計算
                 int in_features;
                 int out_features;
                 for (const auto& param : module.value.named_parameters())

@@ -4,6 +4,7 @@ import torchvision.models as models
 
 def replace_linear_layer(model, new_module):
     for child_name, child_module in model.named_children():
+        # 替換掉 linear layer 並取出 in_features, out_features, weight data, bias data
         if isinstance(child_module, nn.Linear):
             if child_module.bias.data is not None:
                 setattr(model, child_name, new_module(child_module.in_features, child_module.out_features,
@@ -14,18 +15,22 @@ def replace_linear_layer(model, new_module):
         else:
             replace_linear_layer(child_module, new_module)
 
+# 繼承 nn.Linear
 class Split64Linear(nn.Linear):
+    # 初始化 nn.Linear 後將 weight, bias copy 過去
     def __init__(self, in_features, out_features, weight_data, bias=True, bias_data=None):
         super(Split64Linear, self).__init__(in_features, out_features, bias)
         self.weight.data.copy_(weight_data)
         if bias_data is not None:
             self.bias.data.copy_(bias_data)
     
+    # 先從 row split，再 split col，給 input 用
     def _split_64_row_first(self, input_tensor):
         split_rows = torch.split(input_tensor, 64, dim=0)
         split_tensors = [torch.split(t, 64, dim=1) for t in split_rows]
         return split_tensors
 
+    # 先從 col split，再 split row，給 linear layer weight 用
     def _split_64_col_first(self, input_tensor):
         split_cols = torch.split(input_tensor, 64, dim=1)
         split_tensors = [torch.split(t, 64, dim=0) for t in split_cols]
@@ -49,9 +54,11 @@ class Split64Linear(nn.Linear):
 
     def forward(self, input_tensor):
         split_tensors_a = self._split_64_row_first(input_tensor)
+        # weight 要 transpose
         split_tensors_b = self._split_64_col_first(torch.transpose(self.weight, 0, 1))
         total_tensors = self._mul_sub_tensors(split_tensors_a, split_tensors_b)
         concat_tensor = self._concat_tensors(total_tensors)
+        # 加上 bias
         if self.bias is not None:
             concat_tensor = torch.add(concat_tensor, self.bias)
         return concat_tensor

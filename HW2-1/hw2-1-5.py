@@ -12,6 +12,7 @@ activation = {}
 
 for layer_name, layer in model.named_modules():
     if isinstance(layer, nn.Conv2d):
+        # 註冊 Conv2d layer
         layer.register_forward_hook(get_activation(layer_name))
 
 data = torch.randn(1, 3, 224, 224)

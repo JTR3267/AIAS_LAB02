@@ -5,16 +5,19 @@ class Subgraph2(nn.Module):
     def __init__(self):
         super(Subgraph2, self).__init__()
     
+    # 先從 row split，再 split col，給 input1 用
     def _split_64_row_first(self, input_tensor):
         split_rows = torch.split(input_tensor, 64, dim=0)
         split_tensors = [torch.split(t, 64, dim=1) for t in split_rows]
         return split_tensors
 
+    # 先從 col split，再 split row，給 input2 用
     def _split_64_col_first(self, input_tensor):
         split_cols = torch.split(input_tensor, 64, dim=1)
         split_tensors = [torch.split(t, 64, dim=0) for t in split_cols]
         return split_tensors
 
+    # 依照矩陣乘法規則將小矩陣相乘後相加
     def _mul_sub_tensors(self, input_tensor_a, input_tensor_b):
         total_tensors = []
         for split_row_a in input_tensor_a:
@@ -29,6 +32,7 @@ class Subgraph2(nn.Module):
             total_tensors.append(rowwise_tensors)
         return total_tensors
 
+    # concat _mul_sub_tensors 後的數個小矩陣得到最後的 output
     def _concat_tensors(self, tensors):
         colwise_concat_tensors = [torch.cat(tuple(row), dim=1) for row in tensors]
         return torch.cat(tuple(colwise_concat_tensors), dim=0)

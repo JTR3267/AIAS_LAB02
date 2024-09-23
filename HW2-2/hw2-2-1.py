@@ -5,6 +5,7 @@ initializers = dict()
 value_infos = dict()
 outputs = dict()
 
+# 從 4 個 dictionary 中取值
 def get_value_by_key(key):
     if key in inputs.keys():
         return inputs[key]
@@ -29,6 +30,7 @@ def parse_shape(shape):
 onnx_model = onnx.load('./mobilenetv2-10.onnx')
 onnx_model = onnx.shape_inference.infer_shapes(onnx_model)
 
+# 依序取出 model 的 input, initializer, value_info, output 建立 dictionary
 for input in onnx_model.graph.input:
     parsed_input = dict()
     parsed_input["dim"] = tuple(parse_shape(input.type.tensor_type.shape))
@@ -53,6 +55,7 @@ for output in onnx_model.graph.output:
     parsed_output["elem_type"] = output.type.tensor_type.elem_type
     outputs[output.name] = parsed_output
 
+# 2-2-1-1
 ops = dict()
 for i in onnx_model.graph.node:
     if i.op_type not in ops.keys():
@@ -61,13 +64,17 @@ for i in onnx_model.graph.node:
         ops[i.op_type] += 1
 print(f"Operator types: {ops}")
 
+# 2-2-1-2
 operator_attributes = dict()
 for i in onnx_model.graph.node:
     attrs = dict()
+    # Constant, Gather, Unsqueeze, Concat, Gemm 沒有 input
     if not any(op in i.name for op in ["Constant", "Gather", "Unsqueeze", "Concat", "Gemm"]):
         attrs["input_dim"] = get_value_by_key(i.input[0])["dim"]
+    # Shape, Constant, Gather, Unsqueeze, Concat, Reshape 沒有 output
     if not any(op in i.name for op in ["Shape", "Constant", "Gather", "Unsqueeze", "Concat", "Reshape"]):
         attrs["output_dim"] = get_value_by_key(i.output[0])["dim"]
+    # 取剩下的 attribute
     for attr in i.attribute:
         attr_str = str(attr).strip()
         attrs[attr.name] = ", ".join(attr_str.split("\n")[1:])

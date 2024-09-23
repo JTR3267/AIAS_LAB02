@@ -24,6 +24,7 @@ def calculate_output_shape(input_shape, layer):
             if isinstance(layer.dilation, tuple)
             else (layer.dilation, layer.dilation)
         )
+        # ceil_mode 決定要用天花板/地板除
         if isinstance(layer, nn.MaxPool2d) and layer.ceil_mode:
             output_height = math.ceil((
                 input_shape[1] + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1
@@ -46,11 +47,13 @@ def calculate_output_shape(input_shape, layer):
     elif isinstance(layer, nn.Linear):
         return (layer.out_features)
     elif isinstance(layer, nn.AdaptiveAvgPool2d):
+        # 處理 AdaptiveAvgPool2d shape
         output_size = (
             layer.output_size
             if isinstance(layer.output_size, tuple)
             else (layer.output_size, layer.output_size)
         )
+        # output_size 可以是 None，如果是 None 維度就取 input 維度
         if output_size[0] is None and output_size[1] is None:
             return input_shape
         elif output_size[0] is None:
@@ -74,10 +77,12 @@ def calculate_macs(layer, output_shape):
         return macs
     elif isinstance(layer, nn.Linear):
         macs = int(layer.in_features * layer.out_features)
+        # 計算 linear layer 加 bias 的 MACs
         if layer.bias is not None:
             macs += layer.out_features
         return macs
     elif isinstance(layer, nn.BatchNorm2d):
+        # BatchNorm2d 的 MACs 等於 input channel * 2
         return 2 * output_shape[0]
     else:
         return 0
@@ -96,6 +101,7 @@ def not_inception_count(layer, input_shape, total_macs, check_inception):
             
     return input_shape, total_macs
 
+# inception layer 的 output channel 等於 sublayer output channel 加總
 def inception_count(layer, input_shape, total_macs):
     output_shapes = []
     for sub_layer in layer.children():

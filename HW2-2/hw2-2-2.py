@@ -9,12 +9,14 @@ def mutiply_tuple(input_value):
     if len(input_value["dim"]) == 0:
         return 0
     
+    # 將 batch_size 以 1 替換
     dims = (1 if elem == 'batch_size' else elem for elem in input_value["dim"])
     result = 1
 
     for element in dims:
         result *= element
 
+    # 判斷一個 element 多少 byte
     match input_value["elem_type"]:
         case 1:
             result *= 4

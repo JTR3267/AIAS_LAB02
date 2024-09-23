@@ -14,13 +14,16 @@ def replace_linear_layer(model, new_module):
                                                       child_module.weight.data, bias=False))
         else:
             replace_linear_layer(child_module, new_module)
-    
+
+# 比較兩個 tensor
 def compare_tensor(tensor1, tensor2):
+    # 比較 shape
     if tensor1.shape != tensor2.shape:
         print(f"Output shape different")
     else:
         print(f"Same output shape {tensor1.shape}")
-        
+    
+    # 找出兩個 tensor 中 element 最大差的範圍 (以 1e-x 表示)
     threshold = 1
     while True:
         compared_result = torch.sub(tensor1, tensor2) < threshold
@@ -73,6 +76,7 @@ class CompareSplit64Linear(nn.Linear):
         concat_tensor = self._concat_tensors(total_tensors)
         if self.bias is not None:
             concat_tensor = torch.add(concat_tensor, self.bias)
+        # 用 linear layer 原始的 forward 方法計算 output 並比較
         linear_tensor = super(CompareSplit64Linear, self).forward(input_tensor)
         print("Linear layer output compare")
         compare_tensor(concat_tensor, linear_tensor)
@@ -80,11 +84,14 @@ class CompareSplit64Linear(nn.Linear):
 
 alexnet_input = torch.randn(10, 3, 224, 224)
 alexnet = models.alexnet(pretrained=True)
+# copy alexnet，用 models.alexnet(pretrained=True) 再取得一次 alexnet 參數會不同
 replaced_alexnet = copy.deepcopy(alexnet)
 replace_linear_layer(replaced_alexnet, CompareSplit64Linear)
+# evaluation 模式，避免 Dropout 等 layer 影響 inference 結果
 alexnet.eval()
 replaced_alexnet.eval()
 original_output = alexnet(alexnet_input)
 replaced_output = replaced_alexnet(alexnet_input)
+# 比較兩個 model 的 inference 結果
 print("Model output compare")
 compare_tensor(original_output, replaced_output)
