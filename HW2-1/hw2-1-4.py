@@ -58,7 +58,7 @@ def calculate_output_shape(input_shape, layer):
         elif output_size[1] is None:
             return input_shape[:len(input_shape) - 2] + output_size[0] + input_shape[-1]
         else:
-            return input_shape
+            return input_shape[:len(input_shape) - 2] + output_size
     else:
         return input_shape
 
