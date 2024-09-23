@@ -1,5 +1,6 @@
 #include <torch/script.h>
-#include <torch/torch.h>
+
+void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* t_a_m_r);
 
 void getConstantParam(torch::jit::Node* input_node, std::string parme_type_string, torch::jit::Stack* torch_stack)
 {
@@ -29,6 +30,13 @@ void getConstantParam(torch::jit::Node* input_node, std::string parme_type_strin
 				case torch::jit::AttributeKind::t:
 					torch_stack->push_back(input_node->t(parent_attr));
 					break;
+                case torch::jit::AttributeKind::s:
+                    if (parme_type_string.substr(0, 6) == "Device" && input_node->s(parent_attr) == "cpu")
+                    {
+                        torch::Device device(torch::kCPU);
+                        torch_stack->push_back(torch::IValue(device));
+                    }
+                    break;
 			}
 		}
 	}
@@ -38,7 +46,7 @@ void getConstantParam(torch::jit::Node* input_node, std::string parme_type_strin
 	}
 }
 
-void getListParam(torch::jit::Node* input_node, torch::jit::Stack* torch_stack)
+void getListParam(torch::jit::Node* input_node, torch::jit::Stack* torch_stack, std::map<std::string, torch::IValue>* input_map)
 {
 	std::vector<int64_t>                             list_i;
 	std::vector<float>                               list_f;
@@ -47,7 +55,18 @@ void getListParam(torch::jit::Node* input_node, torch::jit::Stack* torch_stack)
 
 	for (const auto& parent_in : input_node->inputs())
     {
-		if (map_method_outputs.find(parent_in) != map_method_outputs.end())
+        if (input_map->find(parent_in->debugName()) != input_map->end())
+        {
+            if ((*input_map)[parent_in->debugName()].isInt())
+            {
+                list_i.push_back((*input_map)[parent_in->debugName()].toInt());
+            }
+            else if ((*input_map)[parent_in->debugName()].isTensor())
+            {
+                list_tensor.push_back((*input_map)[parent_in->debugName()].toTensor());
+            }
+        }
+		else if (map_method_outputs.find(parent_in) != map_method_outputs.end())
         {
 			list_tensor.push_back(map_method_outputs[parent_in].toTensor());
 		}
@@ -112,76 +131,74 @@ std::string getOperatorType(const std::string& str)
     return operator_type.substr(0, operator_type.length() - 2);
 }
 
+void extract_basic_block_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* total_mac)
+{
+    torch::Tensor input_copy = torch::zeros(input_tensor->sizes());
+    input_copy.copy_(*input_tensor);
+
+    for (const auto& sub_module : module.value.named_children())
+    {
+        if (sub_module.name == "downsample")
+        {
+            break;
+        }
+        extract_input_output(sub_module, input_tensor, total_mac);
+    }
+
+    for (const auto& sub_module : module.value.named_children())
+    {
+        if (sub_module.name == "downsample")
+        {
+            for (const auto& downsample_module : sub_module.value.named_children())
+            {
+                extract_input_output(downsample_module, &input_copy, total_mac);
+            }
+        }
+    }
+
+    *input_tensor = input_tensor->add(input_copy);
+    *total_mac += input_tensor->sizes()[0] * input_tensor->sizes()[1];
+}
+
 void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_tensor, int* total_mac)
 {
     if (module.value.named_children().size() == 0)
     {
         auto operator_type = getOperatorType(module.value.dump_to_str(1, 0, 0));
-
-        if (operator_type == "BatchNorm2d")
-        {
-            *total_mac += 2 * input_tensor->sizes()[1];
-            return;
-        }
-        else if (operator_type == "Split64Linear")
+        if (operator_type == "Linear" || operator_type == "Split64Linear")
         {
             auto dim = input_tensor->numel();
             *input_tensor = input_tensor->view({1, dim});
-
-            int in_features;
-            int out_features;
-            for (const auto& param : module.value.named_parameters())
-            {
-                if (param.name.find("weight") != std::string::npos)
-                {
-                    in_features = param.value.sizes()[1];
-                    out_features = param.value.sizes()[0];
-                    break;
-                }
-            }
-            auto linear_layer = torch::nn::Linear(torch::nn::LinearOptions(in_features, out_features));
-            *input_tensor = linear_layer(*input_tensor);
-
-            *total_mac += in_features * out_features;
-            return;
-        }
-        else if (operator_type == "Linear")
-        {
-            auto dim = input_tensor->numel();
-            *input_tensor = input_tensor->view({1, dim});
-
-            int in_features;
-            int out_features;
-            for (const auto& param : module.value.named_parameters())
-            {
-                if (param.name.find("weight") != std::string::npos)
-                {
-                    in_features = param.value.sizes()[1];
-                    out_features = param.value.sizes()[0];
-                    break;
-                }
-            }
-
-            *total_mac += in_features * out_features;
         }
 
         auto graph = module.value.get_method("forward").graph();
 		auto nodes = graph->nodes();
+        torch::jit::Stack torch_stack;
+        std::map<std::string, torch::IValue> input_map;
 
         for (const auto& node : nodes)
         {
-            if (node->maybeOperator())
+            if (node->kind() == torch::prim::ListUnpack)
+            {
+                auto tensor_list = input_map[node->inputs()[0]->debugName()].toTensorList();
+                int tensor_id = 0;
+                for (const auto& tensor : tensor_list)
+                {
+                    input_map[node->outputs()[tensor_id++]->debugName()] = torch::IValue(tensor);
+                }           
+            }
+            else if (node->maybeOperator())
             {
                 auto operation = node->getOperation();
 				auto schema    = node->schema();
-                torch::jit::Stack torch_stack;
+                torch_stack.clear();
                 
                 auto input_nodes = node->inputs();
 				int  idx         = 0;
 
                 for (const auto& param : schema.arguments())
                 {
-					auto input_node = input_nodes[idx++]->node();
+					auto input_node = input_nodes[idx]->node();
                     
 					switch (input_node->kind())
                     {
@@ -189,7 +206,7 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 							getConstantParam(input_node, param.type()->str(), &torch_stack);
 							break;
 						case torch::prim::ListConstruct: 
-							getListParam(input_node, &torch_stack);
+							getListParam(input_node, &torch_stack, &input_map);
 							break;
 						case torch::prim::GetAttr:
 							getGetAttrParam(input_node, module.value.named_attributes(), &torch_stack);
@@ -198,57 +215,89 @@ void extract_input_output(torch::jit::NameModule module, torch::Tensor* input_te
 							torch_stack.push_back(*input_tensor);
 							break;
 						default:
-							std::cout << "Other kind of input node: " << input_node->kind() << std::endl;
+                            torch_stack.push_back(input_map[input_nodes[idx]->debugName()]);
 							break;
-					}					
-				}
-                try
-                {
-                    if (operator_type == "Conv2d")
-                    {
-                        int in_channel = input_tensor->sizes()[1];
-                        int kernel1, kernel2;
-                        for (const auto& param : module.value.named_parameters())
-                        {
-                            if (param.name.find("weight") != std::string::npos)
-                            {
-                                kernel1 = param.value.sizes()[2];
-                                kernel2 = param.value.sizes()[3];
-                                break;
-                            }
-                        }
-                        auto kernel_ops = kernel1 * kernel2 * in_channel;
+                    }
 
-                        operation(torch_stack);
-				        *input_tensor = torch_stack.back().toTensor();
-                        
-                        auto dim = input_tensor->sizes();
-                        auto output_elements = dim[1] * dim[2] * dim[3];
-                        *total_mac += kernel_ops * output_elements;
-                    }
-                    else
-                    {
-                        operation(torch_stack);
-				        *input_tensor = torch_stack.back().toTensor();
-                    }
-                }
-                catch(const std::exception& e)
+                    idx++;
+				}
+
+                if (node->kind() == torch::aten::add)
                 {
-                    if (operator_type == "Conv2d")
-                    {
-                        auto dim = input_tensor->sizes();
-                        *input_tensor = torch::randn({dim[0], dim[1] / 2, dim[2] * 2, dim[3] * 2});
-                        return extract_input_output(module, input_tensor, total_mac);
-                    }
+                    auto tensor1 = torch_stack[0].toTensor();
+                    *total_mac += tensor1.sizes()[0] * tensor1.sizes()[1];
+                }
+                else if (node->kind() == torch::aten::matmul)
+                {
+                    auto tensor1 = torch_stack[0].toTensor();
+                    auto tensor2 = torch_stack[1].toTensor();
+                    *total_mac += tensor1.sizes()[0] * tensor1.sizes()[1] * tensor2.sizes()[1];
+                }
+                
+                operation(torch_stack);
+                input_map[node->outputs()[0]->debugName()] = torch_stack.back();
+            }
+        }
+        if (operator_type == "Conv2d")
+        {
+            int in_channel = input_tensor->sizes()[1];
+            int kernel1, kernel2;
+            for (const auto& param : module.value.named_parameters())
+            {
+                if (param.name.find("weight") != std::string::npos)
+                {
+                    kernel1 = param.value.sizes()[2];
+                    kernel2 = param.value.sizes()[3];
+                    break;
                 }
             }
+            auto kernel_ops = kernel1 * kernel2 * in_channel;
+
+            *input_tensor = torch_stack.back().toTensor();
+            
+            auto dim = input_tensor->sizes();
+            auto output_elements = dim[1] * dim[2] * dim[3];
+            *total_mac += kernel_ops * output_elements;
+        }
+        else
+        {
+            if (operator_type == "BatchNorm2d")
+            {
+                *total_mac += 2 * input_tensor->sizes()[1];
+            }
+            else if (operator_type == "Linear")
+            {
+                int in_features;
+                int out_features;
+                for (const auto& param : module.value.named_parameters())
+                {
+                    if (param.name.find("weight") != std::string::npos)
+                    {
+                        in_features = param.value.sizes()[1];
+                        out_features = param.value.sizes()[0];
+                        break;
+                    }
+                }
+
+                *total_mac += in_features * out_features;
+            }
+            
+            *input_tensor = torch_stack.back().toTensor();
         }
     }
     else
     {
         for (const auto& sub_module : module.value.named_children())
         {
-            extract_input_output(sub_module, input_tensor, total_mac);
+            auto operator_type = getOperatorType(sub_module.value.dump_to_str(1, 0, 0));
+            if (operator_type == "BasicBlock" && sub_module.value.dump_to_str(1, 0, 0).find("downsample") != std::string::npos)
+            {
+                extract_basic_block_input_output(sub_module, input_tensor, total_mac);
+            }
+            else
+            {
+                extract_input_output(sub_module, input_tensor, total_mac);
+            }
         }
     }
 }
@@ -263,18 +312,19 @@ int main(int argc, const char* argv[])
     torch::jit::script::Module module;
     try {
         module = torch::jit::load(argv[1]);
-        torch::Tensor input_tensor = torch::randn({1, 3, 224, 224});
-        int total_mac = 0;
-        for (const auto& sub_module : module.named_children())
-        {
-            extract_input_output(sub_module, &input_tensor, &total_mac);
-        }
-        std::cout << "Total MAC: " << total_mac << std::endl;
     }
     catch (const c10::Error& e) {
         std::cerr << "error loading the model\n";
         return -1;
     }
+
+    torch::Tensor input_tensor = torch::randn({1, 3, 224, 224});
+    int total_mac = 0;
+    for (const auto& sub_module : module.named_children())
+    {
+        extract_input_output(sub_module, &input_tensor, &total_mac);
+    }
+    std::cout << "Total MAC: " << total_mac << std::endl;
 
     return 0;
 }
