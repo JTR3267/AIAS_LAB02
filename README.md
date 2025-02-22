@@ -1,5 +1,3 @@
-# (交大_313552014_簡子茸) AIAS 2024 Lab 2 HW Submission
-
 ## HW 2-1 Model Analysis Using Pytorch
 
 ### 2-1-1. Calculate the number of model parameters：
@@ -1640,8 +1638,3 @@ Params size (MB): 46.76
 Estimated Total Size (MB): 87.11
 ===================================================================================================================
 ```
-
-## Others
-- If you have any comment or recommendation to this lab, you can write it down here to tell us.
-
-
